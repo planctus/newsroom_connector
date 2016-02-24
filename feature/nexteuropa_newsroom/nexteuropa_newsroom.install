@@ -1,0 +1,248 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the nexteuropa_newsroom module.
+ *
+ * @see https://webgate.ec.europa.eu
+ * /CITnet/confluence/display/nexteuropa/Custom+features
+ */
+
+include_once 'nexteuropa_newsroom.install.inc';
+
+/**
+ * Implements hook_enable().
+ */
+function nexteuropa_newsroom_enable() {
+  drupal_set_message(t('Newsroom %v feature is now active on your site.', array('%v' => _nexteuropa_newsroom_get_version())));  
+  if (!db_table_exists(NEXTEUROPA_NEWSROOM_CACHE_TABLE)) {
+    db_create_table(NEXTEUROPA_NEWSROOM_CACHE_TABLE, drupal_get_schema_unprocessed('system', 'cache'));
+  }
+  // Add to solR.
+  multisite_drupal_toolbox_config_solr_bundle(NEXTEUROPA_NEWSROOM_CONTENT_TYPE, 'add');
+}
+
+/**
+ * Implements hook_disable().
+ */
+function nexteuropa_newsroom_disable() {
+  drupal_set_message(t('Newsroom %v feature is now inactive on your site.', array('%v' => _nexteuropa_newsroom_get_version())));
+  if (db_table_exists(NEXTEUROPA_NEWSROOM_CACHE_TABLE)) {
+    db_drop_table(NEXTEUROPA_NEWSROOM_CACHE_TABLE);
+  }
+  // Delete from solR.
+  multisite_drupal_toolbox_config_solr_bundle(NEXTEUROPA_NEWSROOM_CONTENT_TYPE, 'delete');
+}
+
+/**
+ * Implements hook_install().
+ */
+function nexteuropa_newsroom_install() {
+  variable_set('newsroom_summary_block_num_items', 3);
+  variable_set('newsroom_summary_block_num_highlighted_items', 3);
+  variable_set('newsroom_summary_home_block_num_agenda', 3);
+  variable_set('newsroom_summary_home_block_num_items', 3);
+  variable_set('newsroom_summary_home_block_num_highlighted_items', 3);
+  variable_set('newsroom_universe_root', 'http://ec.europa.eu/information_society/newsroom/cf/dae/');
+  variable_set('newsroom_summary_block_columns', 1);
+  variable_set('newsroom_display_agenda', 1);
+  variable_set('newsroom_navigation_depth', 1);
+  variable_set('newsroom_agenda_after_highlights', 1);
+  variable_set('newsroom_display_highlights_begin', 1);
+  _nexteuropa_newsroom_enable_translations();
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function nexteuropa_newsroom_uninstall() {
+  variable_del('newsroom_block_items_by');
+  variable_del('newsroom_summary_block_num_items');
+  variable_del('newsroom_summary_block_num_highlighted_items');
+  variable_del('newsroom_summary_home_block_num_agenda');
+  variable_del('newsroom_summary_home_block_num_items');
+  variable_del('newsroom_summary_home_block_num_highlighted_items');
+  variable_del('newsroom_universe_root');
+  variable_del('newsroom_summary_block_columns');
+  variable_del('newsroom_display_agenda');
+  variable_del('newsroom_url_mode');
+  variable_del('newsroom_navigation_depth');
+  variable_del('newsroom_agenda_after_highlights');
+  variable_del('newsroom_display_highlights_begin');
+  variable_del('newsroom_universe_id');
+  variable_del('newsroom_default_importers');
+}
+
+/**
+ * Set universe ID from previous variable.
+ */
+function nexteuropa_newsroom_update_7101() {
+  if ($newsroom_universe_root = variable_get('newsroom_universe_root', FALSE)) {
+    $universe_id = array_pop(explode('/', trim($newsroom_universe_root, '/')));
+    variable_set('newsroom_universe_id', $universe_id);
+    variable_del('newsroom_universe_root');
+  }
+}
+
+/**
+ * Remove obsolete importer content types and nodes.
+ */
+function nexteuropa_newsroom_update_7102() {
+  $types = array(
+    'newsroom_type_importer',
+    'newsroom_service_importer',
+    'newsroom_topic_importer',
+    'newsroom_delete_item_importer',
+    'newsroom_item_importer',
+  );
+
+  // Delete types.
+  foreach ($types as $type) {
+    // Release content type previously featurized.
+    db_query("UPDATE {node_type} SET `custom` = 1, `locked` = 0 WHERE `type` = :type", array(':type' => $type));
+    // Delete content type.
+    node_type_delete($type);
+  }
+
+  // Update feeds_item table to avoid import of the items again
+  // Drop ID of the importer content types.
+  db_query("UPDATE {feeds_item} SET feed_nid = 0 WHERE id IN ('newsroom_items', 'newsroom_services', 'newsroom_topics', 'newsroom_type')");
+}
+
+/**
+ * Fix imported term GUIDs to avoid "wrong parents".
+ */
+function nexteuropa_newsroom_update_7103() {
+  db_update('feeds_item')
+    ->expression('guid', 'CONCAT(:newstring, guid)', array(':newstring' => 'newsroom_topic-'))
+    ->condition('id', 'newsroom_topics')
+    ->execute();
+
+  db_update('feeds_item')
+    ->expression('guid', 'CONCAT(:newstring, guid)', array(':newstring' => 'newsroom_type-'))
+    ->condition('id', 'newsroom_type')
+    ->execute();
+}
+
+/**
+ * Migrate data from shared teaser to newsroom teaser.
+ */
+function nexteuropa_newsroom_update_7104() {
+  $result = db_query("REPLACE INTO field_data_field_teaser
+  SELECT `entity_type`, `bundle`, `deleted`, `entity_id`, `revision_id`, `language`, `delta`, `field_shared_teaser_value`, `field_shared_teaser_format` FROM field_data_field_shared_teaser shared_teaser
+  WHERE shared_teaser.bundle = 'newsroom_item';");
+
+  $result = db_query("REPLACE INTO field_revision_field_teaser
+  SELECT `entity_type`, `bundle`, `deleted`, `entity_id`, `revision_id`, `language`, `delta`, `field_shared_teaser_value`, `field_shared_teaser_format` FROM field_revision_field_shared_teaser shared_teaser
+  WHERE shared_teaser.bundle = 'newsroom_item';");
+}
+
+/**
+ * Remove obsolete from newsroom selection content type.
+ */
+function nexteuropa_newsroom_update_7105() {
+  field_delete_field('field_bp_newsroom_country');
+  field_delete_field('field_bp_newsroom_co_operator');
+  field_delete_field('field_bp_newsroom_actions');
+  field_delete_field('field_bp_newsroom_ac_operator');
+  field_purge_batch(1000);
+  return t('The following fields have been deleted from your db:
+      	field_bp_newsroom_country,
+        field_bp_newsroom_co_operator,
+        field_bp_newsroom_actions,
+        field_bp_newsroom_ac_operator
+  ');
+}
+
+/**
+ * Remove obsolete from newsroom selection content type.
+ */
+function nexteuropa_newsroom_update_7106() {
+  field_delete_field('field_selected_categories');
+  field_delete_field('field_newsroom_category');
+  field_purge_batch(1000);
+  return t('The following fields have been deleted from your db:
+    field_newsroom_category,
+    field_selected_categories');
+}
+
+/**
+ * Change the datetime to timestamp.
+ */
+function nexteuropa_newsroom_update_7107() {
+// $content type : content type that contains fields to replace.
+  // $module_name : module that contains fields.
+  $module_name = 'nexteuropa_newsroom';
+  // Get db fields instances of content type.
+  $fields_instances = field_info_instances('node', NEXTEUROPA_NEWSROOM_CONTENT_TYPE);
+  
+  // Get feature fields config&instance.
+  module_load_include('inc', $module_name, $module_name . '.features.field_base');
+  if (function_exists($module_name . '_field_default_field_bases')) {
+    $fields_features_info = call_user_func($module_name . '_field_default_field_bases');
+  }
+
+  // Migration.
+  foreach ($fields_instances as $field_name => $field_instance) {
+    // Get db field config.
+    $field_info = field_info_field($field_name);
+
+    // Get feature field config.
+    $field_features_info = NULL;
+
+    if (isset($fields_features_info['user-user-' . $field_name])) {
+      $field_features_info = $fields_features_info['user-user-' . $field_name]['field_config'];
+    }
+
+    // Update only our fields defines to 'datestamp' in feature.field.
+    if (in_array($field_info['type'], array('datetime', 'date')) && $fields_features_info[$field_name]['type'] == 'datestamp') {
+      foreach ($field_info['storage']['details']['sql'] as $type => $info_sql) {
+        $table_name = array_shift(array_keys($info_sql));
+
+        foreach ($info_sql[$table_name] as $id => $column_name) {
+
+          if (field_has_data($field_info)) {
+            // There is data: migrate data and update column to int.
+            watchdog('system', sprintf('Update the  column %s of table %s : migrate datas and update to datestamp.', $column_name, $table_name), NULL, WATCHDOG_WARNING);
+
+            // Create a temporary date field.
+            $param = array('type' => 'int', 'not null' => FALSE, 'default' => 0);
+            db_add_field($table_name, $column_name . '_temp', $param);
+
+            db_update($table_name)
+                    ->expression($column_name . '_temp', "UNIX_TIMESTAMP($column_name)")
+                    ->execute();
+
+            // Delete old column.
+            db_drop_field($table_name, $column_name);
+            db_change_field($table_name, $column_name . '_temp', $column_name, array('type' => 'int'));
+
+          }
+          else {
+            // If there is no data: just update column to int.
+            watchdog('system', sprintf('Update the  column %s of table %s : update to datestamp.', $column_name, $table_name), NULL, WATCHDOG_WARNING);
+            db_change_field($table_name, $column_name, $column_name, array('type' => 'int'));
+          }
+        }
+      }
+
+      watchdog('system', sprintf('Saving field config of %s', $field_name), NULL, WATCHDOG_INFO);
+      db_update('field_config')->fields(array('type' => 'datestamp'))->condition('id', $field_info['id'])->execute();
+
+      // Error logs.
+    }
+    elseif ($field_info['type'] == 'datestamp') {
+      watchdog('system', sprintf('Field %s has been already converted to UNIX timestamp""', $field_name), NULL, WATCHDOG_WARNING);
+    }
+    elseif ($field_info['type'] == 'datetime') {
+      $filename = $module_name . '.features.features.field_base.inc';
+      if (!$field_features_info) {
+        watchdog('system', sprintf('Field %s not found in %s', $field_name, $filename), NULL, WATCHDOG_WARNING);
+      }
+      elseif ($field_features_info['type'] != 'datestamp') {
+        watchdog('system', sprintf('Field %s is not a datestamp in %s', $field_name, $filename), NULL, WATCHDOG_WARNING);
+      }
+    }
+  }
+  field_cache_clear();
+}
